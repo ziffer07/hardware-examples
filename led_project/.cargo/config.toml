@@ -1,0 +1,7 @@
+[build]
+# Sets the default target so you don't have to type it out every time
+target = "avr-none"
+
+[unstable]
+# Tells Cargo to build the core library from source code automatically
+build-std = ["core"]
