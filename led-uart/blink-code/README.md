@@ -5,12 +5,14 @@ Uno's serial connection:
 
 - Send `1` to turn the built-in LED on.
 - Send `0` to turn it off.
-- Any other byte is ignored.
+- Send `?` to check that the firmware is ready; it responds with `R`.
+- After applying `1` or `0`, the firmware echoes the command as an
+  acknowledgment. Any other byte is ignored.
 
 The program targets the Uno's ATmega328P microcontroller, runs without the
 Rust standard library, and accesses the chip's GPIO and USART registers
-directly. It only receives serial data; it does not send an echo or other
-response back to the computer.
+directly. The companion Solana client waits for a confirmed transaction and
+matching on-chain state before sending an LED command to the board.
 
 ## What you need
 
@@ -66,19 +68,29 @@ or any other program using that port before uploading. The `115200` baud rate
 above is for the Uno bootloader upload connection; it is separate from the
 firmware's 9600-baud UART setting used to receive commands.
 
-## Send commands
+## Run the Solana client
 
-After uploading, open the same serial port at **9600 baud, 8 data bits, no
-parity, 1 stop bit (8N1)**:
+Close `minicom` or any other program using the serial port, then run the
+companion client from the repository root:
 
 ```sh
-minicom -D /dev/ttyACM0 -b 9600
+cargo run --manifest-path led-uart/led-client/Cargo.toml -- \
+  <PROGRAM_ID> /dev/ttyACM0
 ```
 
-Type `1` or `0` in the terminal to control the LED. The program does not echo
-received characters, so you might not see the keys you type. If the LED does
-not respond, check that the terminal is connected to the right port at 9600
-baud and that the board is running the newly uploaded firmware.
+Replace `<PROGRAM_ID>` with the deployed Solana program ID, and use the serial
+device for your Uno (often `/dev/ttyACM0` or `/dev/ttyUSB0`). The client opens
+the port at 9600 baud, waits for a firmware-ready response, and then prompts
+for `1`, `0`, or `q`. It sends the command to the Arduino only after Solana
+confirms the transaction and the state account matches the requested value.
+The firmware acknowledges commands after updating the LED output. A missing
+acknowledgment is reported separately because the on-chain state may already
+have changed.
+
+The client uses the configured Solana wallet at
+`~/.config/solana/id.json` and connects to Devnet. Make sure that wallet has
+enough Devnet SOL for transactions. Do not use a wallet with valuable funds
+for this example.
 
 ## How the code works
 
@@ -153,18 +165,18 @@ write_volatile(DDRB, read_volatile(DDRB) | LED_PIN);
 `DDRB` controls whether Port B pins are inputs or outputs. Setting bit 5 makes
 PB5 an output; the bitwise OR leaves the other bits unchanged.
 
-### 4. Set up USART reception
+### 4. Set up USART reception and transmission
 
-The USART is the microcontroller's serial hardware ,refer to section 19.10 of datasheet for detaied analysis. The setup function
-configures it for 9600 baud and enables its receiver:
+The USART is the microcontroller's serial hardware. The setup function
+configures it for 9600 baud and enables both its receiver and transmitter:
 
 ```rust
 // 9600 baud at 16 MHz, using the normal-speed setting
 write_volatile(UBRR0H, 0);
 write_volatile(UBRR0L, 103);
 
-// Enable the USART receiver
-write_volatile(UCSR0B, 1 << 4);
+// Enable the USART receiver and transmitter
+write_volatile(UCSR0B, (1 << 4) | (1 << 3));
 
 // Asynchronous mode, 8 data bits, no parity, 1 stop bit
 write_volatile(UCSR0C, 0x06);
@@ -180,9 +192,9 @@ UBRR = (CPU frequency / (16 × baud rate)) - 1
 
 The value is split across `UBRR0H` (high byte) and `UBRR0L` (low byte).
 Here the high byte is zero and the low byte is 103. Bit 4 of `UCSR0B` is
-`RXEN0`, which enables receiving. Writing `0x06` to `UCSR0C` selects
-asynchronous mode with 8 data bits, no parity, and one stop bit (8N1), in binary it is similar to 00000110. The
-program does not enable the transmitter.
+`RXEN0`, which enables receiving, and bit 3 is `TXEN0`, which enables
+transmitting. Writing `0x06` to `UCSR0C` selects asynchronous mode with 8
+data bits, no parity, and one stop bit (8N1).
 
 ### 5. Poll for and read a received byte
 
@@ -206,7 +218,7 @@ byte. The main loop only reads `UDR0` after checking that a byte is available.
 This is polling: the processor repeatedly checks the status register rather
 than waiting for a USART interrupt.
 
-### 6. Interpret commands and change the LED output
+### 6. Interpret commands, change the LED output, and acknowledge
 
 The main function initializes the LED pin and USART, then repeatedly waits for
 incoming data:
@@ -216,11 +228,17 @@ loop {
     if usart_available() {
         let command = usart_read();
 
-        unsafe {
-            if command == b'1' {
-                write_volatile(PORTB, read_volatile(PORTB) | LED_PIN);
-            } else if command == b'0' {
-                write_volatile(PORTB, read_volatile(PORTB) & !LED_PIN);
+        if command == b'?' {
+            usart_write(b'R');
+        } else {
+            unsafe {
+                if command == b'1' {
+                    write_volatile(PORTB, read_volatile(PORTB) | LED_PIN);
+                    usart_write(command);
+                } else if command == b'0' {
+                    write_volatile(PORTB, read_volatile(PORTB) & !LED_PIN);
+                    usart_write(command);
+                }
             }
         }
     }
@@ -230,4 +248,8 @@ loop {
 `b'1'` and `b'0'` are the ASCII byte values sent by the terminal. For `1`, the
 code sets bit 5 in `PORTB`, turning the LED on. For `0`, it clears just bit 5
 with `& !LED_PIN`, leaving the other Port B outputs unchanged. Other received
-bytes (including a newline sent after a command) do not change the LED.
+bytes (including a newline sent after a command) do not change the LED. The
+`?`/`R` handshake lets the client detect that the firmware is running after
+opening the serial port (which may reset an Uno). The echoed LED command lets
+the client detect that firmware processed it, but it does not independently
+measure the physical LED.

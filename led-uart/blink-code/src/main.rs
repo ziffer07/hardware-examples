@@ -31,8 +31,8 @@ fn usart_initialize() {
         write_volatile(UBRR0H, 0);
         write_volatile(UBRR0L, 103);
 
-        // Enable USART receiver
-        write_volatile(UCSR0B, 1 << 4);
+        // Enable USART receiver and transmitter
+        write_volatile(UCSR0B, (1 << 4) | (1 << 3));
 
         // Asynchronous mode, 8 data bits, no parity, 1 stop bit
         write_volatile(UCSR0C, 0x06);
@@ -51,6 +51,13 @@ fn usart_read() -> u8 {
     }
 }
 
+fn usart_write(byte: u8) {
+    unsafe {
+        while read_volatile(UCSR0A) & (1 << 5) == 0 {}
+        write_volatile(UDR0, byte);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     unsafe {
@@ -64,17 +71,23 @@ pub extern "C" fn main() {
         if usart_available() {
             let command = usart_read();
 
-            unsafe {
-                if command == b'1' {
-                    write_volatile(
-                        PORTB,
-                        read_volatile(PORTB) | LED_PIN,
-                    );
-                } else if command == b'0' {
-                    write_volatile(
-                        PORTB,
-                        read_volatile(PORTB) & !LED_PIN,
-                    );
+            if command == b'?' {
+                usart_write(b'R');
+            } else {
+                unsafe {
+                    if command == b'1' {
+                        write_volatile(
+                            PORTB,
+                            read_volatile(PORTB) | LED_PIN,
+                        );
+                        usart_write(command);
+                    } else if command == b'0' {
+                        write_volatile(
+                            PORTB,
+                            read_volatile(PORTB) & !LED_PIN,
+                        );
+                        usart_write(command);
+                    }
                 }
             }
         }
