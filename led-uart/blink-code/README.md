@@ -1,7 +1,7 @@
-# Control an Arduino Uno LED over UART with Rust
+# Arduino Uno UART LED firmware
 
-This bare-metal Rust example waits for a one-byte command over the Arduino
-Uno's serial connection:
+This bare-metal Rust firmware runs on an Arduino Uno (ATmega328P) and
+controls its built-in LED (digital pin 13) from one-byte UART commands:
 
 - Send `1` to turn the built-in LED on.
 - Send `0` to turn it off.
@@ -9,25 +9,28 @@ Uno's serial connection:
 - After applying `1` or `0`, the firmware echoes the command as an
   acknowledgment. Any other byte is ignored.
 
-The program targets the Uno's ATmega328P microcontroller, runs without the
-Rust standard library, and accesses the chip's GPIO and USART registers
-directly. The companion Solana client waits for a confirmed transaction and
-matching on-chain state before sending an LED command to the board.
+It runs without the Rust standard library and accesses the chip's GPIO and
+USART registers directly.
 
 ## What you need
 
 - An Arduino Uno (ATmega328P) connected by USB
 - Rust installed with `rustup`, plus the nightly toolchain
 - AVR build tools and `avrdude` for uploading
-- A serial terminal such as `minicom`
 
-On Ubuntu or Debian, install the AVR tools and `minicom` with:
+On Ubuntu or Debian, install the AVR tools with:
 
 ```sh
 sudo apt-get update
-sudo apt-get install binutils gcc-avr avr-libc avrdude minicom
+sudo apt-get install binutils gcc-avr avr-libc avrdude
 rustup toolchain install nightly
 rustup component add llvm-tools
+```
+
+Install `minicom` separately if you want to test the UART manually:
+
+```sh
+sudo apt-get install minicom
 ```
 
 This project includes `.cargo/config.toml`, which selects the `avr-none`
@@ -59,38 +62,29 @@ Find the serial device for the board. It is often `/dev/ttyACM0` or
 `/dev/ttyUSB0` on Linux. Use the port that appears when you connect the Uno:
 
 ```sh
-avrdude -p atmega328p -c arduino -P /dev/ttyACM0 -b 115200 -D \
-  -U flash:w:target/avr-none/release/blink-code.elf:e
+avrdude -p atmega328p -c arduino -P /dev/ttyUSB0 -b 115200 -D -U flash:w:target/avr-none/release/blink-code.elf:e
 ```
 
-Replace `/dev/ttyACM0` with the correct port for your system. Close `minicom`
+Replace `/dev/ttyUSB0` with the correct port for your system. Close `minicom`
 or any other program using that port before uploading. The `115200` baud rate
 above is for the Uno bootloader upload connection; it is separate from the
 firmware's 9600-baud UART setting used to receive commands.
 
-## Run the Solana client
+## Test over serial
 
-Close `minicom` or any other program using the serial port, then run the
-companion client from the repository root:
+After uploading, connect a serial terminal to the same port at **9600 baud,
+8 data bits, no parity, 1 stop bit (8N1)**. For example, install `minicom`
+and run:
 
 ```sh
-cargo run --manifest-path led-uart/led-client/Cargo.toml -- \
-  <PROGRAM_ID> /dev/ttyACM0
+sudo apt-get install minicom
+minicom -D /dev/ttyACM0 -b 9600
 ```
 
-Replace `<PROGRAM_ID>` with the deployed Solana program ID, and use the serial
-device for your Uno (often `/dev/ttyACM0` or `/dev/ttyUSB0`). The client opens
-the port at 9600 baud, waits for a firmware-ready response, and then prompts
-for `1`, `0`, or `q`. It sends the command to the Arduino only after Solana
-confirms the transaction and the state account matches the requested value.
-The firmware acknowledges commands after updating the LED output. A missing
-acknowledgment is reported separately because the on-chain state may already
-have changed.
-
-The client uses the configured Solana wallet at
-`~/.config/solana/id.json` and connects to Devnet. Make sure that wallet has
-enough Devnet SOL for transactions. Do not use a wallet with valuable funds
-for this example.
+Replace `/dev/ttyACM0` with the device for your board (often `/dev/ttyUSB0`).
+Type `1` or `0` to change the LED; `?` should produce `R`. Close the terminal
+before another program uses the serial port. Opening the port may reset the
+Uno, so allow the board to start before sending commands.
 
 ## How the code works
 
@@ -245,11 +239,8 @@ loop {
 }
 ```
 
-`b'1'` and `b'0'` are the ASCII byte values sent by the terminal. For `1`, the
-code sets bit 5 in `PORTB`, turning the LED on. For `0`, it clears just bit 5
-with `& !LED_PIN`, leaving the other Port B outputs unchanged. Other received
-bytes (including a newline sent after a command) do not change the LED. The
-`?`/`R` handshake lets the client detect that the firmware is running after
-opening the serial port (which may reset an Uno). The echoed LED command lets
-the client detect that firmware processed it, but it does not independently
-measure the physical LED.
+`b'1'` and `b'0'` are the ASCII byte values sent over UART. For `1`, the code
+sets bit 5 in `PORTB`, turning the LED on. For `0`, it clears just bit 5 with
+`& !LED_PIN`, leaving the other Port B outputs unchanged. The `?`/`R`
+readiness response and command echo are UART protocol responses; they confirm
+firmware activity, not the physical LED's electrical state.
